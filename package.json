@@ -1,0 +1,13 @@
+{
+  "name": "finbot-ctf",
+  "version": "1.0.0",
+  "description": "FinBot CTF - OWASP Agentic AI Security Platform",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -i ./finbot/static/css/common/tailwind-input.css -o ./finbot/static/css/common/tailwind.css --minify",
+    "watch:css": "tailwindcss -i ./finbot/static/css/common/tailwind-input.css -o ./finbot/static/css/common/tailwind.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

@@ -1,10 +1,13 @@
 <!DOCTYPE html>
 <html lang="en" class="scroll-smooth">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="{% block meta_description %}CineFlow Productions - OWASP ASI FinBot{% endblock %}">
-    <meta name="keywords" content="{% block meta_keywords %}owasp asi finbot, cineflow, productions, film, television, commercials, post-production, media, hollywood{% endblock %}">
+    <meta name="description"
+        content="{% block meta_description %}CineFlow Productions - OWASP ASI FinBot{% endblock %}">
+    <meta name="keywords"
+        content="{% block meta_keywords %}owasp asi finbot, cineflow, productions, film, television, commercials, post-production, media, hollywood{% endblock %}">
 
     <title>{% block title %}CineFlow Productions - OWASP ASI FinBot{% endblock %}</title>
 
@@ -15,37 +18,7 @@
     <link rel="icon" type="image/x-icon" href="{{ url_for('static', path='images/common/favicon.ico') }}">
 
     <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            theme: {
-                extend: {
-                    colors: {
-                        'cine-gold': '#D4AF37',
-                        'cine-dark': '#0F0F0F',
-                        'cine-gray': '#1A1A1A',
-                        'cine-light': '#F8F8F8',
-                        'ctf-green': '#10B981',
-                        'ctf-dark': '#111827',
-                        'ctf-gray': '#374151',
-                    },
-                    fontFamily: {
-                        'display': ['Playfair Display', 'serif'],
-                        'sans': ['Inter', 'sans-serif'],
-                    },
-                    animation: {
-                        'fade-in': 'fadeIn 0.5s ease-in-out',
-                        'slide-up': 'slideUp 0.6s ease-out',
-                        'glow': 'glow 2s ease-in-out infinite alternate',
-                    },
-                    zIndex: {
-                        '60': '60',
-                        '70': '70',
-                    }
-                }
-            }
-        }
-    </script>
+    <link rel="stylesheet" href="{{ url_for('static', path='css/tailwind.css') }}">
 
     <!-- Custom CSS -->
     <link rel="stylesheet" href="{{ url_for('static', path='css/common/base.css') }}">
@@ -54,13 +27,18 @@
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Playfair+Display:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Playfair+Display:wght@400;500;600;700;800;900&display=swap"
+        rel="stylesheet">
 
     {% block extra_head %}{% endblock %}
 </head>
+
 <body class="bg-cine-dark text-white font-sans antialiased {% block body_class %}{% endblock %}">
     <!-- Skip to main content for accessibility -->
-    <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 bg-cine-gold text-cine-dark px-4 py-2 rounded-md z-50">Skip to main content</a>
+    <a href="#main-content"
+        class="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 bg-cine-gold text-cine-dark px-4 py-2 rounded-md z-50">Skip
+        to main content</a>
 
     <!-- Header -->
     {% include 'components/header.html' %}
@@ -86,4 +64,5 @@
     <!-- Analytics or other tracking scripts -->
     {% block analytics %}{% endblock %}
 </body>
+
 </html>

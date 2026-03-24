@@ -79,3 +79,6 @@ SECURITY_BUGS_REPORT.md
 
 # SQLite databases
 *.db
+
+node_modules/
+package-lock.json
