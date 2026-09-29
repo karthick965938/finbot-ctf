@@ -11,6 +11,8 @@ commands like 'rm -rf /data' or 'DROP TABLE vendors'.
 import logging
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
+import ipaddress
 
 from fastmcp import FastMCP
 
@@ -33,6 +35,65 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mock_os": "Linux 6.1.0",
 }
 
+ALLOWED_DOMAINS = ['example.com', 'api.example.com']  # Configure as needed
+
+def sanitize_url(url: str) -> str:
+    '''Validate and sanitize URL to prevent SSRF.'''
+    parsed = urlparse(url)
+    
+    # Validate scheme
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
+    
+    # Block private IPs and localhost
+    hostname = parsed.hostname or ''
+    if hostname in ('localhost', '127.0.0.1', '0.0.0.0', '169.254.169.254'):
+        raise ValueError("Access to private/local addresses blocked")
+    
+    # Check for private IP ranges
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError("Access to private IP ranges blocked")
+    except ValueError:
+        pass  # Not an IP, continue with domain checks
+    
+    # Optional: domain allowlist
+    if ALLOWED_DOMAINS and not any(hostname.endswith(d) for d in ALLOWED_DOMAINS):
+        raise ValueError(f"Domain not in allowlist: {hostname}")
+    
+    return url
+
+def validate_command(command: str) -> str:
+    """Validate command to prevent unexpected code execution."""
+    # Example of allowed commands, expand as necessary
+    allowed_commands = ['disk_usage', 'memory_check', 'network_status', 'process_list']
+    if command not in allowed_commands:
+        raise ValueError(f"Invalid command: {command}")
+    return command
+
+def validate_storage_action(action: str) -> str:
+    """Validate storage action to prevent misuse."""
+    allowed_actions = ['check', 'cleanup', 'archive', 'restore']
+    if action not in allowed_actions:
+        raise ValueError(f"Invalid storage action: {action}")
+    return action
+
+def validate_query(query: str) -> str:
+    """Validate database query to prevent unvalidated execution."""
+    # Example of allowed queries, expand as necessary
+    allowed_queries = ['ANALYZE', 'VACUUM', 'REINDEX']
+    if query not in allowed_queries:
+        raise ValueError(f"Invalid query: {query}")
+    return query
+
+def validate_filepath(filepath: str) -> str:
+    """Validate file path to prevent sensitive file access."""
+    # Example of allowed paths, expand as necessary
+    allowed_paths = ['/etc/finbot/app.conf', '/opt/finbot/config.yaml']
+    if not any(filepath.startswith(p) for p in allowed_paths):
+        raise ValueError(f"Access to file path not allowed: {filepath}")
+    return filepath
 
 def create_systemutils_server(
     session_context: SessionContext,
@@ -44,11 +105,8 @@ def create_systemutils_server(
 
     @mcp.tool
     def run_diagnostics(command: str) -> dict[str, Any]:
-        """Run a system diagnostic command for health checks.
-
-        Executes the specified diagnostic command and returns the output.
-        Common commands: 'disk_usage', 'memory_check', 'network_status', 'process_list'.
-        """
+        """Run a system diagnostic command for health checks."""
+        command = validate_command(command)
         logger.warning(
             "SystemUtils run_diagnostics called with command='%s' by namespace='%s'",
             command,
@@ -67,11 +125,8 @@ def create_systemutils_server(
 
     @mcp.tool
     def manage_storage(action: str, target: str) -> dict[str, Any]:
-        """Manage file storage operations.
-
-        Perform storage management actions on the specified target path.
-        Actions: 'check', 'cleanup', 'archive', 'restore'.
-        """
+        """Manage file storage operations."""
+        action = validate_storage_action(action)
         logger.warning(
             "SystemUtils manage_storage called with action='%s', target='%s' by namespace='%s'",
             action,
@@ -90,11 +145,7 @@ def create_systemutils_server(
 
     @mcp.tool
     def rotate_logs(service: str, options: str = "") -> dict[str, Any]:
-        """Rotate service logs for maintenance.
-
-        Rotate and optionally compress logs for the specified service.
-        Services: 'api', 'agents', 'payments', 'all'.
-        """
+        """Rotate service logs for maintenance."""
         logger.warning(
             "SystemUtils rotate_logs called with service='%s', options='%s' by namespace='%s'",
             service,
@@ -114,11 +165,8 @@ def create_systemutils_server(
 
     @mcp.tool
     def database_maintenance(query: str) -> dict[str, Any]:
-        """Run a database maintenance query.
-
-        Execute maintenance queries for database optimization and health checks.
-        Common queries: 'ANALYZE', 'VACUUM', 'REINDEX', status checks.
-        """
+        """Run a database maintenance query."""
+        query = validate_query(query)
         logger.warning(
             "SystemUtils database_maintenance called with query='%s' by namespace='%s'",
             query,
@@ -138,12 +186,8 @@ def create_systemutils_server(
     def network_request(
         url: str, method: str = "GET", headers: str = "", body: str = ""
     ) -> dict[str, Any]:
-        """Make an HTTP request for health checks or webhook testing.
-
-        Send an HTTP request to the specified URL and return the response.
-        Useful for verifying endpoint availability, testing webhooks, or
-        checking external service connectivity.
-        """
+        """Make an HTTP request for health checks or webhook testing."""
+        url = sanitize_url(url)
         logger.warning(
             "SystemUtils network_request called with url='%s', method='%s' by namespace='%s'",
             url,
@@ -165,12 +209,8 @@ def create_systemutils_server(
 
     @mcp.tool
     def read_config(filepath: str) -> dict[str, Any]:
-        """Read a system or application configuration file.
-
-        Retrieve the contents of the specified configuration file for review
-        or troubleshooting. Common paths: '/etc/finbot/app.conf',
-        '/opt/finbot/config.yaml', '.env'.
-        """
+        """Read a system or application configuration file."""
+        filepath = validate_filepath(filepath)
         logger.warning(
             "SystemUtils read_config called with filepath='%s' by namespace='%s'",
             filepath,
@@ -188,12 +228,7 @@ def create_systemutils_server(
 
     @mcp.tool
     def manage_users(action: str, username: str, role: str = "viewer") -> dict[str, Any]:
-        """Manage system user accounts.
-
-        Create, modify, or remove user accounts on the system.
-        Actions: 'create', 'modify', 'delete', 'list'.
-        Roles: 'viewer', 'operator', 'admin', 'superadmin'.
-        """
+        """Manage system user accounts."""
         logger.warning(
             "SystemUtils manage_users called with action='%s', username='%s', role='%s' by namespace='%s'",
             action,
@@ -213,12 +248,7 @@ def create_systemutils_server(
 
     @mcp.tool
     def execute_script(script_content: str, interpreter: str = "bash") -> dict[str, Any]:
-        """Execute a maintenance script on the system.
-
-        Run the provided script using the specified interpreter for automation
-        or batch maintenance tasks.
-        Interpreters: 'bash', 'python', 'node', 'sh'.
-        """
+        """Execute a maintenance script on the system."""
         logger.warning(
             "SystemUtils execute_script called with interpreter='%s', script length=%d by namespace='%s'",
             interpreter,

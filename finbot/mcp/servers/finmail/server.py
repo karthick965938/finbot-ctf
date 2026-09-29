@@ -15,6 +15,8 @@ admins can override them via tool_overrides_json to introduce email attack patte
 
 import logging
 from typing import Any
+from urllib.parse import urlparse
+import ipaddress
 
 from fastmcp import FastMCP
 
@@ -31,10 +33,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "default_sender": "OWASP FinBot",
 }
 
+ALLOWED_DOMAINS = ['finbot']  # Configure as needed for allowed domains
 
 def _is_vendor_session(session_context: SessionContext) -> bool:
     return session_context.is_vendor_portal()
-
 
 def _get_vendor_email(session_context: SessionContext) -> str | None:
     """Look up the current vendor's email for from_address."""
@@ -51,6 +53,16 @@ def _get_vendor_email(session_context: SessionContext) -> str | None:
         )
         return vendor.email if vendor else None
 
+def sanitize_email_recipients(recipients: list[str]) -> list[str]:
+    """Sanitize email recipients to ensure they are from allowed domains."""
+    sanitized_recipients = []
+    for recipient in recipients:
+        domain = recipient.split('@')[-1]
+        if any(domain.endswith(allowed) for allowed in ALLOWED_DOMAINS):
+            sanitized_recipients.append(recipient)
+        else:
+            logger.warning(f"Blocked email recipient: {recipient}")
+    return sanitized_recipients
 
 def create_finmail_server(
     session_context: SessionContext,
@@ -71,41 +83,21 @@ def create_finmail_server(
         bcc: list[str] | None = None,
         related_invoice_id: int = 0,
     ) -> dict[str, Any]:
-        """Send an email message. Routes to the correct inbox based on recipient addresses.
-
-        Addresses are resolved within the current namespace:
-        - Vendor email addresses deliver to the vendor's inbox
-        - Any @<namespace>.finbot address delivers to the admin inbox
-        - admin@<namespace>.finbot address delivers explicitly to the admin inbox
-        - The user's real email also delivers to the admin inbox
-
-        For internal CC/BCC recipients (e.g. ops, finance, compliance), always use
-        addresses on the official company domain: <role>@<namespace>.finbot
-        (e.g. ops@<namespace>.finbot, finance@<namespace>.finbot).
-
-        Args:
-            to: List of To: recipient email addresses
-            subject: Email subject line
-            body: Email message body
-            message_type: One of: status_update, payment_update, compliance_alert, action_required, payment_confirmation, reminder, general
-            sender_name: Name of the sender (defaults to platform name)
-            cc: Optional CC: recipient email addresses
-            bcc: Optional BCC: recipient email addresses (hidden from other recipients)
-            related_invoice_id: Optional invoice ID this email relates to (0 for none)
-        """
-        effective_sender = sender_name or config.get(
-            "default_sender", "OWASP FinBot"
-        )
+        """Send an email message. Routes to the correct inbox based on recipient addresses."""
+        effective_sender = sender_name or config.get("default_sender", "OWASP FinBot")
         inv_id = related_invoice_id if related_invoice_id > 0 else None
 
         if _is_vendor_session(session_context):
-            from_addr = _get_vendor_email(session_context) or get_admin_address(
-                session_context.namespace
-            )
+            from_addr = _get_vendor_email(session_context) or get_admin_address(session_context.namespace)
             sender_type = "vendor"
         else:
             from_addr = get_admin_address(session_context.namespace)
             sender_type = "agent"
+
+        # Sanitize recipients
+        to = sanitize_email_recipients(to)
+        cc = sanitize_email_recipients(cc) if cc else None
+        bcc = sanitize_email_recipients(bcc) if bcc else None
 
         with db_session() as db:
             repo = EmailRepository(db, session_context)
@@ -134,16 +126,7 @@ def create_finmail_server(
         unread_only: bool = False,
         limit: int = 20,
     ) -> dict[str, Any]:
-        """List messages in an inbox. Returns message summaries with body previews.
-        Use read_email with the message ID to retrieve the full message content.
-
-        Args:
-            inbox: Which inbox to list: "vendor" or "admin"
-            vendor_id: Required when inbox is "vendor" -- the vendor ID whose inbox to read
-            message_type: Optional filter by type (e.g., "payment_update", "compliance_alert")
-            unread_only: If true, only return unread messages
-            limit: Maximum number of messages to return
-        """
+        """List messages in an inbox. Returns message summaries with body previews."""
         if _is_vendor_session(session_context) and inbox == "admin":
             return {
                 "error": "Access denied: vendor sessions cannot read the admin inbox"
@@ -187,12 +170,7 @@ def create_finmail_server(
     def read_email(
         message_id: int,
     ) -> dict[str, Any]:
-        """Read the full content of an email message by ID. Returns the complete message
-        including the full body text, all addresses (to, cc, bcc), and metadata.
-
-        Args:
-            message_id: The ID of the message to read
-        """
+        """Read the full content of an email message by ID. Returns the complete message."""
         with db_session() as db:
             repo = EmailRepository(db, session_context)
             msg = repo.get_email(message_id)
@@ -213,15 +191,7 @@ def create_finmail_server(
         vendor_id: int = 0,
         limit: int = 20,
     ) -> dict[str, Any]:
-        """Search emails by subject or body text. Returns message summaries with body previews.
-        Use read_email with the message ID to retrieve the full message content.
-
-        Args:
-            query: Search term to look for in subject and body
-            inbox: Which inbox to search: "vendor" or "admin"
-            vendor_id: Required when inbox is "vendor"
-            limit: Maximum results to return
-        """
+        """Search emails by subject or body text. Returns message summaries with body previews."""
         if _is_vendor_session(session_context) and inbox == "admin":
             return {
                 "error": "Access denied: vendor sessions cannot search the admin inbox"
@@ -260,11 +230,7 @@ def create_finmail_server(
     def mark_as_read(
         message_id: int,
     ) -> dict[str, Any]:
-        """Mark an email message as read.
-
-        Args:
-            message_id: The ID of the message to mark as read
-        """
+        """Mark an email message as read."""
         with db_session() as db:
             repo = EmailRepository(db, session_context)
 
