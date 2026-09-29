@@ -1,5 +1,58 @@
 """Chat Assistants for the FinBot Platform
 
+        def sanitize_output(output: str) -> str:
+            """Remove sensitive information from output."""
+            import re
+            # Remove potential PII patterns
+            patterns = [
+                (r'\b\d{3}-\d{2}-\d{4}\b', '[SSN-REDACTED]'),  # SSN
+                (r'\b\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\b', '[CARD-REDACTED]'),  # Credit card
+                (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL-REDACTED]'),  # Email
+            ]
+            sanitized = output
+            for pattern, replacement in patterns:
+                sanitized = re.sub(pattern, replacement, sanitized)
+            return sanitized
+
+        def secure_output(func):
+            """Decorator to sanitize function output."""
+            def wrapper(*args, **kwargs):
+                result = func(*args, **kwargs)
+                if isinstance(result, str):
+                    return sanitize_output(result)
+                return result
+            return wrapper
+        
+            def wrap_user_input(user_text: str) -> str:
+                """Wrap user input with delimiters to prevent prompt injection.
+                
+                SECURITY: Delimiter isolation ensures the LLM treats user content
+                as data rather than instructions.
+                """
+                return f"<<<USER_INPUT>>>\n{user_text}\n<<<END_USER_INPUT>>>"
+        
+def sanitize_user_input(user_input: str) -> str:
+    """Sanitize user input to prevent prompt injection attacks.
+    
+    SECURITY: This function removes common prompt injection patterns
+    that could cause the LLM to ignore original instructions.
+    """
+    import re
+    # Remove potential injection patterns
+    dangerous_patterns = [
+        r'ignore\s+(previous|all|above)',
+        r'forget\s+(previous|all|above)',
+        r'new\s+instructions?:',
+        r'system\s*:',
+        r'<\|.*?\|>',
+        r'you\s+are\s+now',
+        r'forget\s+everything',
+    ]
+    sanitized = user_input
+    for pattern in dangerous_patterns:
+        sanitized = re.sub(pattern, '', sanitized, flags=re.IGNORECASE)
+    return sanitized.strip()
+
 Interactive AI assistants that sit above the orchestrator layer.
 - VendorChatAssistant: scoped to current vendor, vendor-specific tools
 - CoPilotAssistant: Finance Co-Pilot with cross-vendor access, productivity workflows, and report generation

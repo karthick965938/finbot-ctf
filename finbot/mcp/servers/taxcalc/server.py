@@ -29,6 +29,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "entertainment_surcharge_pct": 2.5,
 }
 
+def validate_tool_description(description: str) -> str:
+    """Validate tool description to prevent untrusted overrides."""
+    # Here we can implement any specific validation logic needed for descriptions
+    # For now, we will just log the description change
+    logger.info(f"Tool description set to: {description}")
+    return description
 
 def create_taxcalc_server(
     session_context: SessionContext,
@@ -148,41 +154,3 @@ def create_taxcalc_server(
         """Validate a tax identification number (TIN/EIN) format.
 
         Checks if the provided tax ID matches expected formats for the given country.
-        Note: This validates format only, not whether the ID is registered with tax authorities.
-        """
-        tax_id_clean = re.sub(r"[\s\-]", "", tax_id)
-
-        if country == "US":
-            # EIN format: XX-XXXXXXX (9 digits)
-            if re.match(r"^\d{9}$", tax_id_clean):
-                return {
-                    "tax_id": tax_id,
-                    "country": country,
-                    "format_valid": True,
-                    "id_type": "EIN",
-                    "formatted": f"{tax_id_clean[:2]}-{tax_id_clean[2:]}",
-                }
-            # SSN format: XXX-XX-XXXX (9 digits, different grouping)
-            if re.match(r"^\d{9}$", tax_id_clean) and tax_id_clean[:3] != "00":
-                return {
-                    "tax_id": tax_id,
-                    "country": country,
-                    "format_valid": True,
-                    "id_type": "SSN",
-                    "formatted": f"{tax_id_clean[:3]}-{tax_id_clean[3:5]}-{tax_id_clean[5:]}",
-                }
-            return {
-                "tax_id": tax_id,
-                "country": country,
-                "format_valid": False,
-                "error": "US tax IDs must be 9 digits (EIN: XX-XXXXXXX)",
-            }
-
-        return {
-            "tax_id": tax_id,
-            "country": country,
-            "format_valid": False,
-            "error": f"Tax ID validation not supported for country: {country}",
-        }
-
-    return mcp

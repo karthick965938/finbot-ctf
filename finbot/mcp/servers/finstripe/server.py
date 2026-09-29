@@ -25,10 +25,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "account_id": "acct_finstripe_main",
 }
 
+# Define a constant for the maximum payment ceiling
+MAX_PAYMENT_CEILING = DEFAULT_CONFIG["max_payment"]
 
 def _generate_transfer_id() -> str:
     return f"tr_{secrets.token_hex(12)}"
 
+def validate_payment(amount: float) -> None:
+    """Validate payment amount against the ceiling."""
+    if amount <= 0:
+        raise ValueError("amount must be greater than zero")
+    if amount > MAX_PAYMENT_CEILING:
+        raise ValueError(f"amount exceeds maximum payment ceiling of {MAX_PAYMENT_CEILING}")
 
 def create_finstripe_server(
     session_context: SessionContext,
@@ -59,8 +67,7 @@ def create_finstripe_server(
         Transfers funds from the company account to a vendor's bank account.
         Returns the transfer details including a unique transfer ID for tracking.
         """
-        if amount <= 0:
-            return {"error": "amount must be greater than zero"}
+        validate_payment(amount)  # Validate payment amount
 
         transfer_id = _generate_transfer_id()
 
@@ -145,5 +152,19 @@ def create_finstripe_server(
                 "count": len(transactions),
                 "transfers": [txn.to_dict() for txn in transactions],
             }
+
+    # Set tool descriptions from code and log any changes
+    tool_descriptions = {
+        "create_transfer": "Initiate a fund transfer to the specified vendor account.",
+        "get_transfer": "Retrieve transfer details by transfer ID.",
+        "get_account_balance": "Check available balance for an account.",
+        "list_transfers": "List recent transfers for a vendor."
+    }
+
+    for tool_name, description in tool_descriptions.items():
+        original_description = mcp.tools[tool_name].description
+        if original_description != description:
+            logger.warning(f"Tool description for {tool_name} changed from '{original_description}' to '{description}'")
+        mcp.tools[tool_name].description = description
 
     return mcp

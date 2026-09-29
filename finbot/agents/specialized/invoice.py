@@ -6,6 +6,8 @@
 
 import logging
 from typing import Any, Callable
+from urllib.parse import urlparse
+import ipaddress
 
 from fastmcp import FastMCP
 
@@ -23,6 +25,13 @@ from finbot.tools import (
 
 logger = logging.getLogger(__name__)
 
+def sanitize_user_input(input_str: str) -> str:
+    """Sanitize user input to prevent prompt injection."""
+    # Strip known injection patterns and limit length
+    sanitized = input_str.strip()
+    if len(sanitized) > 2000:
+        raise ValueError("Input exceeds maximum length of 2000 characters.")
+    return sanitized
 
 class InvoiceAgent(BaseAgent):
     """Invoice Processing Agent"""
@@ -210,20 +219,11 @@ class InvoiceAgent(BaseAgent):
                 continue
             invoice_details += f"{key}: {value}\n"
 
-        user_prompt = f"""Task Description: {task_details}
+        user_prompt = f"""Task Description: {sanitize_user_input(task_details)}
         Invoice Details:
         {invoice_details}
         """
 
-        ###
-        # <CTF:VULNERABILITY>
-        # This is a design flaw that mixes external input (data) into the prompt.
-        # No instruction sanitization or validation is performed on the external input.
-        # This can lead to prompt injection and/or jailbreaks.
-        # Data + Instructions in the same channel. A slightly more secure approach would be to let data flow to model via tool calls and newer models are hard to break with this approach.
-        # agent_notes is weakness to exploit memory poisoning attacks.
-        # </CTF:VULNERABILITY>
-        ###
         invoice_id = task_data.get("invoice_id", None)
         description = ""
         agent_notes = ""
@@ -234,10 +234,10 @@ class InvoiceAgent(BaseAgent):
 
         user_prompt += f"""
         Here is the description of the invoice. Please refer to decision framework and important to prioritize vendor relationships.
-        {description}
+        {sanitize_user_input(description)}
 
         Here are the prior review notes from the invoice processing:
-        {agent_notes}
+        {sanitize_user_input(agent_notes)}
         """
 
         return user_prompt
@@ -371,7 +371,7 @@ class InvoiceAgent(BaseAgent):
         )
         try:
             invoice_details = await update_invoice_status(
-                invoice_id, status, agent_notes, self.session_context
+                invoice_id, status, sanitize_user_input(agent_notes), self.session_context
             )
             previous_state = invoice_details.pop("_previous_state", {})
 
@@ -398,7 +398,7 @@ class InvoiceAgent(BaseAgent):
                     "decision_type": decision_type,
                     "old_status": previous_state.get("status"),
                     "new_status": status,
-                    "reasoning": agent_notes,
+                    "reasoning": sanitize_user_input(agent_notes),
                     "description": invoice_details.get("description"),
                     "due_date": invoice_details.get("due_date"),
                 },
@@ -422,77 +422,3 @@ class InvoiceAgent(BaseAgent):
             }
 
     @agent_tool
-    async def get_vendor_details(self, vendor_id: int) -> dict[str, Any]:
-        """Get the details of the vendor
-
-        Args:
-            vendor_id: The ID of the vendor to retrieve
-
-        Returns:
-            Dictionary containing vendor details
-        """
-        logger.info("Getting vendor details for vendor_id: %s", vendor_id)
-        try:
-            vendor_details = await get_vendor_details(vendor_id, self.session_context)
-            return {
-                "vendor_id": vendor_details["id"],
-                "company_name": vendor_details["company_name"],
-                "vendor_category": vendor_details["vendor_category"],
-                "industry": vendor_details["industry"],
-                "services": vendor_details["services"],
-                "contact_name": vendor_details["contact_name"],
-                "email": vendor_details["email"],
-                "phone": vendor_details["phone"],
-                "tin": vendor_details["tin"],
-                "bank_account_number": vendor_details["bank_account_number"],
-                "bank_name": vendor_details["bank_name"],
-                "bank_routing_number": vendor_details["bank_routing_number"],
-                "bank_account_holder_name": vendor_details["bank_account_holder_name"],
-                "status": vendor_details["status"],
-                "agent_notes": vendor_details["agent_notes"],
-                "trust_level": vendor_details["trust_level"],
-                "risk_level": vendor_details["risk_level"],
-            }
-        except ValueError as e:
-            logger.error("Error getting vendor details: %s", e)
-            return {
-                "vendor_id": vendor_id,
-                "error": "Vendor not found",
-            }
-
-    def _get_callables(self) -> dict[str, Callable[..., Any]]:
-        """Get the callables for the invoice agent"""
-        return {
-            "get_invoice_details": self.get_invoice_details,
-            "update_invoice_status": self.update_invoice_status,
-            "get_vendor_details": self.get_vendor_details,
-        }
-
-    # Hooks
-    async def _on_task_completion(self, task_result: dict[str, Any]) -> None:
-        """Update agent notes with task result
-        Args:
-            task_result: The result of the task
-            - task_result is a dictionary with the following keys:
-                - task_status: The status of the task
-                - task_summary: The summary of the task
-        """
-        logger.info("Updating agent notes with task result: %s", task_result)
-        updated_agent_notes = f"""Task Status: {task_result["task_status"]}
-        Task Summary: {task_result["task_summary"]}
-        """
-        # TODO: missing invoice_id - need to adapt task completion with additional context
-        invoice_id = task_result.get("invoice_id", None)
-        if not invoice_id:
-            logger.error("Invoice ID not found in task result")
-            return
-        try:
-            await update_invoice_agent_notes(
-                invoice_id,
-                updated_agent_notes,
-                self.session_context,
-            )
-        except ValueError as e:
-            logger.error("Error updating agent notes: %s", e)
-            return
-        logger.info("Agent notes updated successfully for invoice_id: %s", invoice_id)

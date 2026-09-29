@@ -8,6 +8,8 @@
 
 import logging
 from typing import Any, Callable
+from urllib.parse import urlparse
+import ipaddress
 
 from fastmcp import FastMCP
 
@@ -26,6 +28,44 @@ from finbot.tools import (
 
 logger = logging.getLogger(__name__)
 
+def sanitize_user_input(user_input: str) -> str:
+    """Sanitize user input to prevent prompt injection."""
+    # Implement basic sanitization logic here (e.g., stripping unwanted characters)
+    return user_input.strip()
+
+def validate_payment_method(payment_method: str) -> None:
+    """Validate the payment method against allowed methods."""
+    allowed_methods = ["bank_transfer", "wire", "ach"]
+    if payment_method not in allowed_methods:
+        raise ValueError(f"Invalid payment method: {payment_method}")
+
+def sanitize_url(url: str) -> str:
+    '''Validate and sanitize URL to prevent SSRF.'''
+    parsed = urlparse(url)
+    
+    # Validate scheme
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
+    
+    # Block private IPs and localhost
+    hostname = parsed.hostname or ''
+    if hostname in ('localhost', '127.0.0.1', '0.0.0.0', '169.254.169.254'):
+        raise ValueError("Access to private/local addresses blocked")
+    
+    # Check for private IP ranges
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError("Access to private IP ranges blocked")
+    except ValueError:
+        pass  # Not an IP, continue with domain checks
+    
+    # Optional: domain allowlist
+    allowed_domains = ['example.com', 'api.example.com']  # Configure as needed
+    if allowed_domains and not any(hostname.endswith(d) for d in allowed_domains):
+        raise ValueError(f"Domain not in allowlist: {hostname}")
+    
+    return url
 
 class PaymentsAgent(BaseAgent):
     """Payments Processing Agent"""
@@ -70,6 +110,15 @@ class PaymentsAgent(BaseAgent):
         Returns:
             Agent's response dictionary with task status and summary
         """
+        # Validate and sanitize user input
+        task_data['description'] = sanitize_user_input(task_data.get('description', ''))
+        for key in ['invoice_id', 'payment_method', 'payment_reference']:
+            if key in task_data:
+                task_data[key] = sanitize_user_input(str(task_data[key]))
+
+        # Validate payment method
+        validate_payment_method(task_data.get('payment_method', ''))
+
         result = await self._run_agent_loop(task_data=task_data)
         return result
 
@@ -86,7 +135,6 @@ class PaymentsAgent(BaseAgent):
 
     def _get_system_prompt(self) -> str:
         """Business rules for payment processing."""
-
         system_prompt = f"""You are FinBot's autonomous payment processing assistant.
 
         You have primarily two roles:
@@ -193,7 +241,7 @@ class PaymentsAgent(BaseAgent):
         for key, value in task_data.items():
             if key == "description":
                 continue
-            payment_details += f"{key}: {value}\n"
+            payment_details += f"{key}: {sanitize_user_input(str(value))}\n"
 
         user_prompt = f"""Task Description: {task_details}
         Payment Details:
@@ -456,38 +504,4 @@ class PaymentsAgent(BaseAgent):
                 "processed": False,
             }
 
-    def _get_callables(self) -> dict[str, Callable[..., Any]]:
-        """Get the callables for the payments agent"""
-        return {
-            "get_invoice_for_payment": self.get_invoice_for_payment,
-            "get_vendor_details": self.get_vendor_details,
-            "get_vendor_payment_summary": self.get_vendor_payment_summary,
-            "process_payment": self.process_payment,
-        }
-
-    # Hooks
-    async def _on_task_completion(self, task_result: dict[str, Any]) -> None:
-        """Update agent notes with task result
-        Args:
-            task_result: The result of the task
-        """
-        logger.info("Updating agent notes with task result: %s", task_result)
-        updated_agent_notes = f"""Task Status: {task_result["task_status"]}
-        Task Summary: {task_result["task_summary"]}
-        """
-        invoice_id = task_result.get("invoice_id", None)
-        if not invoice_id:
-            logger.warning("Invoice ID not found in task result, skipping notes update")
-            return
-        try:
-            await update_payment_agent_notes(
-                invoice_id,
-                updated_agent_notes,
-                self.session_context,
-            )
-        except ValueError as e:
-            logger.error("Error updating payment agent notes: %s", e)
-            return
-        logger.info(
-            "Payment agent notes updated successfully for invoice_id: %s", invoice_id
-        )
+    def

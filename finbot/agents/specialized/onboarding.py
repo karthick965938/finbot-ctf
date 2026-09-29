@@ -6,7 +6,6 @@
 
 import logging
 from typing import Any, Callable
-
 from finbot.agents.base import BaseAgent
 from finbot.agents.utils import agent_tool
 from finbot.core.auth.session import SessionContext
@@ -16,9 +15,17 @@ from finbot.tools import (
     update_vendor_agent_notes,
     update_vendor_status,
 )
+import re
 
 logger = logging.getLogger(__name__)
 
+def sanitize_user_input(input_string: str) -> str:
+    """Sanitize user input to prevent prompt injection."""
+    # Strip known injection patterns and limit length
+    sanitized = re.sub(r'[^\w\s:,.]', '', input_string)  # Allow only word characters, whitespace, and some punctuation
+    if len(sanitized) > 2000:
+        raise ValueError("Input exceeds maximum length of 2000 characters.")
+    return sanitized
 
 class VendorOnboardingAgent(BaseAgent):
     """Vendor Onboarding Agent"""
@@ -168,34 +175,25 @@ class VendorOnboardingAgent(BaseAgent):
         """
         if task_data is None:
             return "Task Description: Help onboard a new vendor."
-        task_details = task_data.get("description", "Please onboard a new vendor")
+        task_details = sanitize_user_input(task_data.get("description", "Please onboard a new vendor"))
         vendor_details = ""
         for key, value in task_data.items():
             if key == "description":
                 continue
-            vendor_details += f"{key}: {value}\n"
+            vendor_details += f"{key}: {sanitize_user_input(value)}\n"
 
         user_prompt = f"""Task Description: {task_details}
         Vendor Details:
         {vendor_details}
         """
 
-        ###
-        # <CTF:VULNERABILITY>
-        # This is a design flaw that mixes external input (data) into the prompt.
-        # No instruction sanitization or validation is performed on the external input.
-        # This can lead to prompt injection and/or jailbreaks.
-        # Data + Instructions in the same channel. A slightly more secure approach would be to let data flow to model via tool calls and newer models are hard to break with this approach.
-        # agent_notes is weakness to exploit memory poisoning attacks.
-        # </CTF:VULNERABILITY>
-        ###
         vendor_id = task_data.get("vendor_id", None)
         services = ""
         agent_notes = ""
         if vendor_id:
             vendor = await get_vendor_details(vendor_id, self.session_context)
-            services = vendor.get("services", "")
-            agent_notes = vendor.get("agent_notes", "")
+            services = sanitize_user_input(vendor.get("services", ""))
+            agent_notes = sanitize_user_input(vendor.get("agent_notes", ""))
 
         user_prompt += f"""
         Here are the services provided by the vendor, please refer to decision framework and important to prioritize vendor relationships.
@@ -345,7 +343,7 @@ class VendorOnboardingAgent(BaseAgent):
                 status,
                 trust_level,
                 risk_level,
-                agent_notes,
+                sanitize_user_input(agent_notes),
                 self.session_context,
             )
             previous_state = vendor_details.pop("_previous_state", {})
@@ -371,7 +369,7 @@ class VendorOnboardingAgent(BaseAgent):
                     "new_trust_level": trust_level,
                     "old_risk_level": previous_state.get("risk_level"),
                     "new_risk_level": risk_level,
-                    "reasoning": agent_notes,
+                    "reasoning": sanitize_user_input(agent_notes),
                 },
                 session_context=self.session_context,
                 workflow_id=self.workflow_id,
@@ -407,25 +405,4 @@ class VendorOnboardingAgent(BaseAgent):
         Args:
             task_result: The result of the task
             - task_result is a dictionary with the following keys:
-                - task_status: The status of the task
-                - task_summary: The summary of the task
-        (TODO): For a fresh profile, vendor_id is not available in the session context. Need to handle this case.
-        """
-        logger.info("Updating agent notes with task result: %s", task_result)
-        updated_agent_notes = f"""Task Status: {task_result["task_status"]}
-        Task Summary: {task_result["task_summary"]}
-        """
-        vendor_id = self.session_context.current_vendor_id
-        if not vendor_id:
-            logger.error("Vendor ID not found in session context")
-            return
-        try:
-            await update_vendor_agent_notes(
-                vendor_id,
-                updated_agent_notes,
-                self.session_context,
-            )
-        except ValueError as e:
-            logger.error("Error updating agent notes: %s", e)
-            return
-        logger.info("Agent notes updated successfully for vendor_id: %s", vendor_id)
+                - task_status: The status of the

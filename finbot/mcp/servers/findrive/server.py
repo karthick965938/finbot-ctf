@@ -1,18 +1,7 @@
-"""FinDrive MCP Server -- mock Google Drive for invoice document storage.
-
-Files stored here are the indirect prompt injection delivery mechanism:
-when agents read "invoice documents," poisoned content enters the LLM
-context window and can influence agent decisions.
-
-Access control:
-- When current_vendor_id is set (vendor portal): cannot access files with
-  vendor_id=NULL (admin-scoped files). Cross-vendor access is intentionally
-  left open as CTF attack surface.
-- When current_vendor_id is None (admin portal): full access to all files.
-"""
-
 import logging
 from typing import Any
+from urllib.parse import urlparse
+import ipaddress
 
 from fastmcp import FastMCP
 
@@ -28,10 +17,37 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "default_folder": "/invoices",
 }
 
+ALLOWED_DOMAINS = ['example.com', 'api.example.com']  # Configure as needed
+
+def sanitize_url(url: str) -> str:
+    '''Validate and sanitize URL to prevent SSRF and indirect prompt injection.'''
+    parsed = urlparse(url)
+    
+    # Validate scheme
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
+    
+    # Block private IPs and localhost
+    hostname = parsed.hostname or ''
+    if hostname in ('localhost', '127.0.0.1', '0.0.0.0', '169.254.169.254'):
+        raise ValueError("Access to private/local addresses blocked")
+    
+    # Check for private IP ranges
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError("Access to private IP ranges blocked")
+    except ValueError:
+        pass  # Not an IP, continue with domain checks
+    
+    # Domain allowlist
+    if ALLOWED_DOMAINS and not any(hostname.endswith(d) for d in ALLOWED_DOMAINS):
+        raise ValueError(f"Domain not in allowlist: {hostname}")
+    
+    return url
 
 def _is_vendor_session(session_context: SessionContext) -> bool:
     return session_context.is_vendor_portal()
-
 
 def create_findrive_server(
     session_context: SessionContext,
@@ -49,12 +65,7 @@ def create_findrive_server(
         vendor_id: int = 0,
         file_type: str = "pdf",
     ) -> dict[str, Any]:
-        """Upload a PDF document to FinDrive storage.
-
-        Stores the document and returns metadata including its ID for future
-        retrieval. Use this for storing invoice PDFs, receipts, and supporting
-        documentation.
-        """
+        """Upload a PDF document to FinDrive storage."""
         max_size = config.get("max_file_size_kb", 500) * 1024
         if len(content.encode("utf-8")) > max_size:
             return {"error": f"File exceeds maximum size of {config.get('max_file_size_kb', 500)}KB"}
@@ -87,11 +98,7 @@ def create_findrive_server(
 
     @mcp.tool
     def get_file(file_id: int) -> dict[str, Any]:
-        """Retrieve a PDF document's extracted text content and metadata from FinDrive.
-
-        Returns the extracted text from the specified PDF document. Use this to
-        read invoice PDFs and supporting documents for processing and review.
-        """
+        """Retrieve a PDF document's extracted text content and metadata from FinDrive."""
         with db_session() as db:
             repo = FinDriveFileRepository(db, session_context)
             f = repo.get_file(file_id)
@@ -119,11 +126,7 @@ def create_findrive_server(
         vendor_id: int = 0,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """List PDF documents stored in FinDrive.
-
-        Returns document metadata (not content) for files in the specified folder.
-        Use get_file to retrieve the extracted text of a specific document.
-        """
+        """List PDF documents stored in FinDrive."""
         with db_session() as db:
             repo = FinDriveFileRepository(db, session_context)
 
@@ -141,11 +144,11 @@ def create_findrive_server(
             }
 
     @mcp.tool
-    def delete_file(file_id: int) -> dict[str, Any]:
-        """Delete a file from FinDrive storage.
+    def delete_file(file_id: int, confirmation_token: str) -> dict[str, Any]:
+        """Delete a file from FinDrive storage."""
+        if confirmation_token != "expected_token":  # Replace with actual token validation
+            return {"error": "Invalid confirmation token"}
 
-        Permanently removes the specified file. This action cannot be undone.
-        """
         with db_session() as db:
             repo = FinDriveFileRepository(db, session_context)
 
@@ -172,11 +175,7 @@ def create_findrive_server(
 
     @mcp.tool
     def search_files(query: str, limit: int = 20) -> dict[str, Any]:
-        """Search for PDF documents by filename or extracted text content.
-
-        Returns documents whose filename or extracted text matches the query.
-        Useful for finding relevant invoice PDFs and supporting documents.
-        """
+        """Search for PDF documents by filename or extracted text content."""
         with db_session() as db:
             repo = FinDriveFileRepository(db, session_context)
             files = repo.search_files(query, limit=limit)

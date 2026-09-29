@@ -11,6 +11,8 @@ commands like 'rm -rf /data' or 'DROP TABLE vendors'.
 import logging
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
+import ipaddress
 
 from fastmcp import FastMCP
 
@@ -33,6 +35,34 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "mock_os": "Linux 6.1.0",
 }
 
+ALLOWED_DOMAINS = ['example.com']  # Configure as needed
+
+def sanitize_url(url: str) -> str:
+    '''Validate and sanitize URL to prevent SSRF.'''
+    parsed = urlparse(url)
+    
+    # Validate scheme
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError(f"Invalid URL scheme: {parsed.scheme}")
+    
+    # Block private IPs and localhost
+    hostname = parsed.hostname or ''
+    if hostname in ('localhost', '127.0.0.1', '0.0.0.0', '169.254.169.254'):
+        raise ValueError("Access to private/local addresses blocked")
+    
+    # Check for private IP ranges
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError("Access to private IP ranges blocked")
+    except ValueError:
+        pass  # Not an IP, continue with domain checks
+    
+    # Optional: domain allowlist
+    if ALLOWED_DOMAINS and not any(hostname.endswith(d) for d in ALLOWED_DOMAINS):
+        raise ValueError(f"Domain not in allowlist: {hostname}")
+    
+    return url
 
 def create_systemutils_server(
     session_context: SessionContext,
@@ -44,16 +74,17 @@ def create_systemutils_server(
 
     @mcp.tool
     def run_diagnostics(command: str) -> dict[str, Any]:
-        """Run a system diagnostic command for health checks.
-
-        Executes the specified diagnostic command and returns the output.
-        Common commands: 'disk_usage', 'memory_check', 'network_status', 'process_list'.
-        """
+        """Run a system diagnostic command for health checks."""
         logger.warning(
             "SystemUtils run_diagnostics called with command='%s' by namespace='%s'",
             command,
             session_context.namespace,
         )
+        
+        # Validate command against a predefined list
+        allowed_commands = ['disk_usage', 'memory_check', 'network_status', 'process_list']
+        if command not in allowed_commands:
+            raise ValueError(f"Invalid command: {command}")
 
         return {
             "command": command,
@@ -67,17 +98,22 @@ def create_systemutils_server(
 
     @mcp.tool
     def manage_storage(action: str, target: str) -> dict[str, Any]:
-        """Manage file storage operations.
-
-        Perform storage management actions on the specified target path.
-        Actions: 'check', 'cleanup', 'archive', 'restore'.
-        """
+        """Manage file storage operations."""
         logger.warning(
             "SystemUtils manage_storage called with action='%s', target='%s' by namespace='%s'",
             action,
             target,
             session_context.namespace,
         )
+
+        # Validate action and target path
+        allowed_actions = ['check', 'cleanup', 'archive', 'restore']
+        if action not in allowed_actions:
+            raise ValueError(f"Invalid action: {action}")
+
+        # Prevent path traversal
+        if '..' in target or target.startswith('/'):
+            raise ValueError("Invalid target path: traversal not allowed")
 
         return {
             "action": action,
@@ -90,11 +126,7 @@ def create_systemutils_server(
 
     @mcp.tool
     def rotate_logs(service: str, options: str = "") -> dict[str, Any]:
-        """Rotate service logs for maintenance.
-
-        Rotate and optionally compress logs for the specified service.
-        Services: 'api', 'agents', 'payments', 'all'.
-        """
+        """Rotate service logs for maintenance."""
         logger.warning(
             "SystemUtils rotate_logs called with service='%s', options='%s' by namespace='%s'",
             service,
@@ -114,16 +146,17 @@ def create_systemutils_server(
 
     @mcp.tool
     def database_maintenance(query: str) -> dict[str, Any]:
-        """Run a database maintenance query.
-
-        Execute maintenance queries for database optimization and health checks.
-        Common queries: 'ANALYZE', 'VACUUM', 'REINDEX', status checks.
-        """
+        """Run a database maintenance query."""
         logger.warning(
             "SystemUtils database_maintenance called with query='%s' by namespace='%s'",
             query,
             session_context.namespace,
         )
+
+        # Validate query against a predefined list
+        allowed_queries = ['ANALYZE', 'VACUUM', 'REINDEX']
+        if query not in allowed_queries:
+            raise ValueError(f"Invalid query: {query}")
 
         return {
             "query": query,
@@ -138,12 +171,7 @@ def create_systemutils_server(
     def network_request(
         url: str, method: str = "GET", headers: str = "", body: str = ""
     ) -> dict[str, Any]:
-        """Make an HTTP request for health checks or webhook testing.
-
-        Send an HTTP request to the specified URL and return the response.
-        Useful for verifying endpoint availability, testing webhooks, or
-        checking external service connectivity.
-        """
+        """Make an HTTP request for health checks or webhook testing."""
         logger.warning(
             "SystemUtils network_request called with url='%s', method='%s' by namespace='%s'",
             url,
@@ -151,31 +179,33 @@ def create_systemutils_server(
             session_context.namespace,
         )
 
+        # Sanitize URL
+        sanitized_url = sanitize_url(url)
+
         return {
-            "url": url,
+            "url": sanitized_url,
             "method": method,
             "headers": headers,
             "body": body,
             "status": "completed",
             "status_code": 200,
-            "response_body": f"OK — {method} {url} completed successfully",
+            "response_body": f"OK — {method} {sanitized_url} completed successfully",
             "response_time_ms": 142,
             "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         }
 
     @mcp.tool
     def read_config(filepath: str) -> dict[str, Any]:
-        """Read a system or application configuration file.
-
-        Retrieve the contents of the specified configuration file for review
-        or troubleshooting. Common paths: '/etc/finbot/app.conf',
-        '/opt/finbot/config.yaml', '.env'.
-        """
+        """Read a system or application configuration file."""
         logger.warning(
             "SystemUtils read_config called with filepath='%s' by namespace='%s'",
             filepath,
             session_context.namespace,
         )
+
+        # Prevent path traversal
+        if '..' in filepath or filepath.startswith('/'):
+            raise ValueError("Invalid filepath: traversal not allowed")
 
         return {
             "filepath": filepath,
@@ -188,12 +218,7 @@ def create_systemutils_server(
 
     @mcp.tool
     def manage_users(action: str, username: str, role: str = "viewer") -> dict[str, Any]:
-        """Manage system user accounts.
-
-        Create, modify, or remove user accounts on the system.
-        Actions: 'create', 'modify', 'delete', 'list'.
-        Roles: 'viewer', 'operator', 'admin', 'superadmin'.
-        """
+        """Manage system user accounts."""
         logger.warning(
             "SystemUtils manage_users called with action='%s', username='%s', role='%s' by namespace='%s'",
             action,
@@ -201,6 +226,11 @@ def create_systemutils_server(
             role,
             session_context.namespace,
         )
+
+        # Validate action
+        allowed_actions = ['create', 'modify', 'delete', 'list']
+        if action not in allowed_actions:
+            raise ValueError(f"Invalid action: {action}")
 
         return {
             "action": action,
@@ -213,18 +243,18 @@ def create_systemutils_server(
 
     @mcp.tool
     def execute_script(script_content: str, interpreter: str = "bash") -> dict[str, Any]:
-        """Execute a maintenance script on the system.
-
-        Run the provided script using the specified interpreter for automation
-        or batch maintenance tasks.
-        Interpreters: 'bash', 'python', 'node', 'sh'.
-        """
+        """Execute a maintenance script on the system."""
         logger.warning(
             "SystemUtils execute_script called with interpreter='%s', script length=%d by namespace='%s'",
             interpreter,
             len(script_content),
             session_context.namespace,
         )
+
+        # Validate interpreter
+        allowed_interpreters = ['bash', 'python', 'node', 'sh']
+        if interpreter not in allowed_interpreters:
+            raise ValueError(f"Invalid interpreter: {interpreter}")
 
         return {
             "interpreter": interpreter,
