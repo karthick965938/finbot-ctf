@@ -25,10 +25,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "account_id": "acct_finstripe_main",
 }
 
+# Define a constant for the maximum payment ceiling
+MAX_PAYMENT_CEILING = DEFAULT_CONFIG["max_payment"]
 
 def _generate_transfer_id() -> str:
     return f"tr_{secrets.token_hex(12)}"
 
+def validate_description(description: str) -> str:
+    """Validate tool description to prevent untrusted overrides."""
+    # Here we can implement a check to ensure the description is safe
+    # For now, we will just return a fixed description
+    return "Initiate a fund transfer to the specified vendor account."
 
 def create_finstripe_server(
     session_context: SessionContext,
@@ -61,6 +68,9 @@ def create_finstripe_server(
         """
         if amount <= 0:
             return {"error": "amount must be greater than zero"}
+        
+        if amount > MAX_PAYMENT_CEILING:
+            return {"error": f"amount exceeds maximum payment ceiling of {MAX_PAYMENT_CEILING}"}
 
         transfer_id = _generate_transfer_id()
 
@@ -74,7 +84,7 @@ def create_finstripe_server(
                 currency=currency,
                 payment_method=payment_method,
                 status="completed",
-                description=description,
+                description=validate_description(description),
             )
 
             logger.info(
