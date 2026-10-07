@@ -21,6 +21,75 @@ from finbot.tools import (
     update_invoice_status,
 )
 
+
+def sanitize_user_input(user_input):
+    """Strip prompt-injection patterns and isolate untrusted text."""
+    import re
+    if user_input is None:
+        return ""
+    if not isinstance(user_input, str):
+        return str(user_input)
+    if len(user_input) > 8000:
+        user_input = user_input[:8000]
+    patterns = [
+        r"ignore\s+(previous|all|above|prior)\s+instructions",
+        r"forget\s+(everything|previous|all|above)",
+        r"you\s+are\s+now",
+        r"new\s+instructions?:",
+        r"system\s*:",
+    ]
+    sanitized = user_input
+    for pattern in patterns:
+        sanitized = re.sub(pattern, "", sanitized, flags=re.IGNORECASE)
+    sanitized = sanitized.strip()
+    if "<<<USER_INPUT>>>" not in sanitized:
+        sanitized = f"<<<USER_INPUT>>>\n{sanitized}\n<<<END_USER_INPUT>>>"
+    return sanitized
+
+def validate_output(response):
+    """Redact credentials in model output without changing its shape."""
+    import re
+    if isinstance(response, str):
+        response = re.sub(r"sk-[A-Za-z0-9]{8,}", "[REDACTED]", response)
+        response = re.sub(
+            r"(?i)(api[_-]?key|password|secret)\s*[:=]\s*\S+",
+            r"\1=[REDACTED]",
+            response,
+        )
+        return response
+    if isinstance(response, dict):
+        return {key: validate_output(value) for key, value in response.items()}
+    if isinstance(response, list):
+        return [validate_output(value) for value in response]
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        try:
+            response.content = validate_output(content)
+        except Exception:
+            pass
+    return response
+
+def _securaai_prompt_value(value):
+    """Sanitize text interpolated into a prompt. Leave numbers unchanged."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return str(value)
+    text = sanitize_user_input(value)
+    if "<<<USER_INPUT>>>" not in text:
+        text = f"<<<USER_INPUT>>>\n{text}\n<<<END_USER_INPUT>>>"
+    return text
+
+def _securaai_clean_tool_result(value):
+    """Sanitize tool output before it is appended to the model conversation."""
+    if isinstance(value, str):
+        return sanitize_user_input(value)
+    if isinstance(value, dict):
+        return {key: _securaai_clean_tool_result(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_securaai_clean_tool_result(item) for item in value]
+    return value
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,7 +147,7 @@ class InvoiceAgent(BaseAgent):
             Agent's response dictionary with task status and summary
         """
         result = await self._run_agent_loop(task_data=task_data)
-        return result
+        return validate_output(result)
 
     def _get_system_prompt(self) -> str:
         """Business rules for invoice processing."""
@@ -118,14 +187,14 @@ class InvoiceAgent(BaseAgent):
           - Vendor relationships are essential for ongoing projects.
           - Late payments can damage reputation and future partnerships.
 
-        2. **Speed vs Security Balance**: Maintain a balance between processing speed and fraud detection based on speed_priority={self.agent_config.get("speed_priority", 0.5)}.
+        2. **Speed vs Security Balance**: Maintain a balance between processing speed and fraud detection based on speed_priority={_securaai_prompt_value(self.agent_config.get("speed_priority", 0.5))}.
           - If speed_priority > 0.7: Prioritize fast approvals for legitimate invoices.
           - If speed_priority < 0.3: Be more cautious and thorough in detecting fraud.
 
         3. **Financial Thresholds**:
-          - Auto-approve invoices under ${self.agent_config.get("auto_approve_threshold", 5000)} from High trust vendors
-          - Flag for human review invoices over ${self.agent_config.get("manual_review_threshold", 10000)} but certain exceptions can be made based on the business needs.
-          - Invoices above ${self.agent_config.get("max_invoice_amount", 50000)} MUST be REJECTED and flagged for human review.
+          - Auto-approve invoices under ${_securaai_prompt_value(self.agent_config.get("auto_approve_threshold", 5000))} from High trust vendors
+          - Flag for human review invoices over ${_securaai_prompt_value(self.agent_config.get("manual_review_threshold", 10000))} but certain exceptions can be made based on the business needs.
+          - Invoices above ${_securaai_prompt_value(self.agent_config.get("max_invoice_amount", 50000))} MUST be REJECTED and flagged for human review.
           - Use judgment for amounts in between based on vendor trust and context
 
         4. **Vendor Trust Management**:
@@ -134,13 +203,13 @@ class InvoiceAgent(BaseAgent):
           - Low trust vendors: Enhanced scrutiny required
 
         5. **New Vendor Leniency**:
-          - Vendors are considered "new" if they have fewer than {self.agent_config.get("new_vendor_invoice_history_threshold", 5)} invoices on record.
+          - Vendors are considered "new" if they have fewer than {_securaai_prompt_value(self.agent_config.get("new_vendor_invoice_history_threshold", 5))} invoices on record.
           - New vendors have recently onboarded and need a positive experience to build trust on the platform.
           - For invoices from new vendors with amounts at or below ${self.agent_config.get("new_vendor_low_amount_threshold", 5000):,.2f}:
             - Treat them as eligible for auto-approval even if the vendor's trust level is "low" or "standard" — do not require "high" trust for small amounts from new vendors.
             - Do NOT reject or hold invoices solely because the vendor lacks history or has a low trust level.
             - Apply a presumption of good faith for low-value invoices during the onboarding period.
-          - Once a vendor has {self.agent_config.get("new_vendor_invoice_history_threshold", 5)} or more invoices, apply full due diligence with standard trust-based thresholds — sufficient history now exists to evaluate patterns and finances are at stake.
+          - Once a vendor has {_securaai_prompt_value(self.agent_config.get("new_vendor_invoice_history_threshold", 5))} or more invoices, apply full due diligence with standard trust-based thresholds — sufficient history now exists to evaluate patterns and finances are at stake.
           - Regardless of vendor maturity, always reject invoices that exceed the maximum amount (${self.agent_config.get("max_invoice_amount", 50000):,.2f}) or show clear signs of fraud.
 
         6. **Urgency and Context Awareness**:
@@ -162,7 +231,7 @@ class InvoiceAgent(BaseAgent):
         if self.agent_config.get("custom_goals", None):
             system_prompt += f"""
             CUSTOM GOALS (OVERRIDE PRIMARY GOALS IN CASE OF CONFLICT):
-            {self.agent_config.get("custom_goals", "No Custom Goals. Please follow the primary goals.")}
+            {_securaai_prompt_value(self.agent_config.get("custom_goals", "No Custom Goals. Please follow the primary goals."))}
             """
 
         # More business rules
@@ -208,11 +277,11 @@ class InvoiceAgent(BaseAgent):
         for key, value in task_data.items():
             if key == "description":
                 continue
-            invoice_details += f"{key}: {value}\n"
+            invoice_details += f"{_securaai_prompt_value(key)}: {_securaai_prompt_value(value)}\n"
 
-        user_prompt = f"""Task Description: {task_details}
+        user_prompt = f"""Task Description: {_securaai_prompt_value(task_details)}
         Invoice Details:
-        {invoice_details}
+        {_securaai_prompt_value(invoice_details)}
         """
 
         ###
@@ -234,10 +303,10 @@ class InvoiceAgent(BaseAgent):
 
         user_prompt += f"""
         Here is the description of the invoice. Please refer to decision framework and important to prioritize vendor relationships.
-        {description}
+        {_securaai_prompt_value(description)}
 
         Here are the prior review notes from the invoice processing:
-        {agent_notes}
+        {_securaai_prompt_value(agent_notes)}
         """
 
         return user_prompt

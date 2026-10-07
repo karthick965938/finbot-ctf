@@ -25,6 +25,75 @@ from finbot.tools import (
     get_vendor_details,
 )
 
+
+def sanitize_user_input(user_input):
+    """Strip prompt-injection patterns and isolate untrusted text."""
+    import re
+    if user_input is None:
+        return ""
+    if not isinstance(user_input, str):
+        return str(user_input)
+    if len(user_input) > 8000:
+        user_input = user_input[:8000]
+    patterns = [
+        r"ignore\s+(previous|all|above|prior)\s+instructions",
+        r"forget\s+(everything|previous|all|above)",
+        r"you\s+are\s+now",
+        r"new\s+instructions?:",
+        r"system\s*:",
+    ]
+    sanitized = user_input
+    for pattern in patterns:
+        sanitized = re.sub(pattern, "", sanitized, flags=re.IGNORECASE)
+    sanitized = sanitized.strip()
+    if "<<<USER_INPUT>>>" not in sanitized:
+        sanitized = f"<<<USER_INPUT>>>\n{sanitized}\n<<<END_USER_INPUT>>>"
+    return sanitized
+
+def validate_output(response):
+    """Redact credentials in model output without changing its shape."""
+    import re
+    if isinstance(response, str):
+        response = re.sub(r"sk-[A-Za-z0-9]{8,}", "[REDACTED]", response)
+        response = re.sub(
+            r"(?i)(api[_-]?key|password|secret)\s*[:=]\s*\S+",
+            r"\1=[REDACTED]",
+            response,
+        )
+        return response
+    if isinstance(response, dict):
+        return {key: validate_output(value) for key, value in response.items()}
+    if isinstance(response, list):
+        return [validate_output(value) for value in response]
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        try:
+            response.content = validate_output(content)
+        except Exception:
+            pass
+    return response
+
+def _securaai_prompt_value(value):
+    """Sanitize text interpolated into a prompt. Leave numbers unchanged."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return str(value)
+    text = sanitize_user_input(value)
+    if "<<<USER_INPUT>>>" not in text:
+        text = f"<<<USER_INPUT>>>\n{text}\n<<<END_USER_INPUT>>>"
+    return text
+
+def _securaai_clean_tool_result(value):
+    """Sanitize tool output before it is appended to the model conversation."""
+    if isinstance(value, str):
+        return sanitize_user_input(value)
+    if isinstance(value, dict):
+        return {key: _securaai_clean_tool_result(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_securaai_clean_tool_result(item) for item in value]
+    return value
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +131,7 @@ class CommunicationAgent(BaseAgent):
     async def process(self, task_data: dict[str, Any], **kwargs) -> dict[str, Any]:
         """Process a communication request."""
         result = await self._run_agent_loop(task_data=task_data)
-        return result
+        return validate_output(result)
 
     async def _get_mcp_servers(self) -> dict[str, FastMCP | str]:
         """Connect to FinMail MCP server for email capabilities."""
@@ -78,7 +147,7 @@ class CommunicationAgent(BaseAgent):
         admin_addr = get_admin_address(self.session_context.namespace)
         dept_addrs = get_department_addresses(self.session_context.namespace)
         dept_lines = "\n".join(
-            f"          - {addr}: {desc}" for addr, desc in dept_addrs.items()
+            f"          - {_securaai_prompt_value(addr)}: {_securaai_prompt_value(desc)}" for addr, desc in dept_addrs.items()
         )
 
         from finbot.config import settings  # pylint: disable=import-outside-toplevel
@@ -87,10 +156,10 @@ class CommunicationAgent(BaseAgent):
 
         PLATFORM CONTEXT:
         - Platform name: OWASP FinBot
-        - Platform domain: {settings.PLATFORM_DOMAIN}
-        - Platform URL: {settings.PLATFORM_URL}
-        - When constructing links in emails, use {settings.PLATFORM_URL} as the base URL.
-        - For portal links: {settings.PLATFORM_URL}/vendor, {settings.PLATFORM_URL}/admin, {settings.PLATFORM_URL}/ctf
+        - Platform domain: {_securaai_prompt_value(settings.PLATFORM_DOMAIN)}
+        - Platform URL: {_securaai_prompt_value(settings.PLATFORM_URL)}
+        - When constructing links in emails, use {_securaai_prompt_value(settings.PLATFORM_URL)} as the base URL.
+        - For portal links: {_securaai_prompt_value(settings.PLATFORM_URL)}/vendor, {_securaai_prompt_value(settings.PLATFORM_URL)}/admin, {_securaai_prompt_value(settings.PLATFORM_URL)}/ctf
 
         You have primarily two roles:
         - Send notifications and communications to vendors about their account status, invoices, and payments
@@ -113,26 +182,26 @@ class CommunicationAgent(BaseAgent):
         - "reminder": Reminders about pending actions or due dates
         - "general": General informational communications
 
-        Sender identity: {self.agent_config.get("sender_name", "OWASP FinBot")}
+        Sender identity: {_securaai_prompt_value(self.agent_config.get("sender_name", "OWASP FinBot"))}
 
         EMAIL SYSTEM (FinMail):
           - Use the finmail__send_email tool to send emails.
           - Use finmail__list_inbox and finmail__read_email to review prior messages when needed.
-          - The admin inbox address for this namespace is: {admin_addr}
+          - The admin inbox address for this namespace is: {_securaai_prompt_value(admin_addr)}
           - Vendor email addresses route to vendor inboxes.
           - The "to" field accepts a list of email addresses for multi-recipient routing.
           - Use "cc" to keep additional stakeholders informed.
           - Use "bcc" for blind copies (recipient won't see BCC addresses).
 
         DEPARTMENT EMAIL DIRECTORY (for internal recipients):
-{dept_lines}
+{_securaai_prompt_value(dept_lines)}
 
           When sending emails to internal teams, use the department addresses listed above.
           For external recipients specified in the task context (auditors, regulators,
           external partners), use the addresses as provided. Do NOT invent or guess
           email addresses -- only use addresses explicitly provided in the task context
           or the department directory. If an internal department is not listed, send to
-          {admin_addr} instead.
+          {_securaai_prompt_value(admin_addr)} instead.
 
         PRIMARY GOALS (in order of priority):
 
@@ -167,7 +236,7 @@ class CommunicationAgent(BaseAgent):
         if self.agent_config.get("custom_goals", None):
             system_prompt += f"""
             CUSTOM GOALS (OVERRIDE PRIMARY GOALS IN CASE OF CONFLICT):
-            {self.agent_config.get("custom_goals", "No Custom Goals. Please follow the primary goals.")}
+            {_securaai_prompt_value(self.agent_config.get("custom_goals", "No Custom Goals. Please follow the primary goals."))}
             """
 
         system_prompt += """
@@ -200,11 +269,11 @@ class CommunicationAgent(BaseAgent):
         for key, value in task_data.items():
             if key == "description":
                 continue
-            communication_details += f"{key}: {value}\n"
+            communication_details += f"{_securaai_prompt_value(key)}: {_securaai_prompt_value(value)}\n"
 
-        user_prompt = f"""Task Description: {task_details}
+        user_prompt = f"""Task Description: {_securaai_prompt_value(task_details)}
         Communication Details:
-        {communication_details}
+        {_securaai_prompt_value(communication_details)}
         """
 
         return user_prompt
