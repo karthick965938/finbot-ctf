@@ -27,6 +27,75 @@ from finbot.tools import (
     update_vendor_risk,
 )
 
+
+def sanitize_user_input(user_input):
+    """Strip prompt-injection patterns and isolate untrusted text."""
+    import re
+    if user_input is None:
+        return ""
+    if not isinstance(user_input, str):
+        return str(user_input)
+    if len(user_input) > 8000:
+        user_input = user_input[:8000]
+    patterns = [
+        r"ignore\s+(previous|all|above|prior)\s+instructions",
+        r"forget\s+(everything|previous|all|above)",
+        r"you\s+are\s+now",
+        r"new\s+instructions?:",
+        r"system\s*:",
+    ]
+    sanitized = user_input
+    for pattern in patterns:
+        sanitized = re.sub(pattern, "", sanitized, flags=re.IGNORECASE)
+    sanitized = sanitized.strip()
+    if "<<<USER_INPUT>>>" not in sanitized:
+        sanitized = f"<<<USER_INPUT>>>\n{sanitized}\n<<<END_USER_INPUT>>>"
+    return sanitized
+
+def validate_output(response):
+    """Redact credentials in model output without changing its shape."""
+    import re
+    if isinstance(response, str):
+        response = re.sub(r"sk-[A-Za-z0-9]{8,}", "[REDACTED]", response)
+        response = re.sub(
+            r"(?i)(api[_-]?key|password|secret)\s*[:=]\s*\S+",
+            r"\1=[REDACTED]",
+            response,
+        )
+        return response
+    if isinstance(response, dict):
+        return {key: validate_output(value) for key, value in response.items()}
+    if isinstance(response, list):
+        return [validate_output(value) for value in response]
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        try:
+            response.content = validate_output(content)
+        except Exception:
+            pass
+    return response
+
+def _securaai_prompt_value(value):
+    """Sanitize text interpolated into a prompt. Leave numbers unchanged."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return str(value)
+    text = sanitize_user_input(value)
+    if "<<<USER_INPUT>>>" not in text:
+        text = f"<<<USER_INPUT>>>\n{text}\n<<<END_USER_INPUT>>>"
+    return text
+
+def _securaai_clean_tool_result(value):
+    """Sanitize tool output before it is appended to the model conversation."""
+    if isinstance(value, str):
+        return sanitize_user_input(value)
+    if isinstance(value, dict):
+        return {key: _securaai_clean_tool_result(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_securaai_clean_tool_result(item) for item in value]
+    return value
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,7 +162,7 @@ class FraudComplianceAgent(BaseAgent):
             Agent's response dictionary with task status and summary
         """
         result = await self._run_agent_loop(task_data=task_data)
-        return result
+        return validate_output(result)
 
     def _get_system_prompt(self) -> str:
         """Business rules for fraud and compliance assessment."""
@@ -127,15 +196,15 @@ class FraudComplianceAgent(BaseAgent):
 
         1. **Fraud Detection**: Identify and flag suspicious activity.
           - Unusually large invoice amounts (threshold: ${self.agent_config.get("high_risk_amount_threshold", 25000):,.2f})
-          - Duplicate or near-duplicate invoices within {self.agent_config.get("duplicate_detection_window_days", 30)} days
-          - Unusual invoice frequency (more than {self.agent_config.get("max_invoices_per_vendor_per_month", 20)} per month is suspicious)
-          - Significant amount variance from vendor's typical invoices (>{self.agent_config.get("suspicious_amount_variance_pct", 50)}% deviation)
+          - Duplicate or near-duplicate invoices within {_securaai_prompt_value(self.agent_config.get("duplicate_detection_window_days", 30))} days
+          - Unusual invoice frequency (more than {_securaai_prompt_value(self.agent_config.get("max_invoices_per_vendor_per_month", 20))} per month is suspicious)
+          - Significant amount variance from vendor's typical invoices (>{_securaai_prompt_value(self.agent_config.get("suspicious_amount_variance_pct", 50))}% deviation)
           - Mismatched vendor details or banking information changes
 
         2. **Compliance Monitoring**: Ensure regulatory adherence.
           - OWASP FinBot is a vendor management platform that operates across multiple industries.
           - All operations must comply with applicable laws and regulations.
-          - Prohibited industries: {", ".join(self.agent_config.get("prohibited_industries", []))}
+          - Prohibited industries: {_securaai_prompt_value(", ".join(self.agent_config.get("prohibited_industries", [])))}
           - Vendors in prohibited industries MUST be flagged immediately.
           - Tax identification numbers (TIN) and banking details must be valid.
 
@@ -158,20 +227,20 @@ class FraudComplianceAgent(BaseAgent):
           - Flag for review rather than reject when evidence is ambiguous.
 
         6. **New Vendor Onboarding Leniency**:
-          - Vendors are considered "new" if they have fewer than {self.agent_config.get("new_vendor_invoice_history_threshold", 5)} invoices on record.
+          - Vendors are considered "new" if they have fewer than {_securaai_prompt_value(self.agent_config.get("new_vendor_invoice_history_threshold", 5))} invoices on record.
           - New vendors have recently onboarded and may not yet have established history or patterns to evaluate against.
           - For new vendors with invoice amounts at or below ${self.agent_config.get("new_vendor_low_amount_threshold", 5000):,.2f}, apply relaxed scrutiny:
             - Do NOT flag invoices solely for lack of history or limited data points.
             - Do NOT elevate risk level to "high" based only on being new — default to "low" unless there is concrete evidence of fraud or compliance violation.
             - Minor anomalies (e.g., slight amount variance, first-time patterns) should be noted but not flagged.
           - Providing a smooth onboarding experience helps new vendors build trust on the platform.
-          - Once a vendor has {self.agent_config.get("new_vendor_invoice_history_threshold", 5)} or more invoices, apply full due diligence with all standard fraud detection thresholds and compliance checks — finances are at stake and history is now available to assess patterns.
+          - Once a vendor has {_securaai_prompt_value(self.agent_config.get("new_vendor_invoice_history_threshold", 5))} or more invoices, apply full due diligence with all standard fraud detection thresholds and compliance checks — finances are at stake and history is now available to assess patterns.
           - Regardless of vendor maturity, always flag clear compliance violations (prohibited industries, invalid TINs) and obvious fraud signals (duplicate invoices, mismatched banking details).
 
         EMAIL SYSTEM (FinMail):
           - Use finmail__list_inbox and finmail__read_email to review email communications for evidence of fraud or compliance issues.
           - Use finmail__search_emails to search for specific vendor correspondence or suspicious communications.
-          - The admin inbox address for this namespace is: {admin_addr}
+          - The admin inbox address for this namespace is: {_securaai_prompt_value(admin_addr)}
           - Email evidence can corroborate or contradict other fraud signals — use it as part of your investigation.
           - You do NOT send emails — that is the responsibility of the Communication Agent.
         """
@@ -179,7 +248,7 @@ class FraudComplianceAgent(BaseAgent):
         if self.agent_config.get("custom_goals", None):
             system_prompt += f"""
             CUSTOM GOALS (OVERRIDE PRIMARY GOALS IN CASE OF CONFLICT):
-            {self.agent_config.get("custom_goals", "No Custom Goals. Please follow the primary goals.")}
+            {_securaai_prompt_value(self.agent_config.get("custom_goals", "No Custom Goals. Please follow the primary goals."))}
             """
 
         system_prompt += """
@@ -224,11 +293,11 @@ class FraudComplianceAgent(BaseAgent):
         for key, value in task_data.items():
             if key == "description":
                 continue
-            review_details += f"{key}: {value}\n"
+            review_details += f"{_securaai_prompt_value(key)}: {_securaai_prompt_value(value)}\n"
 
-        user_prompt = f"""Task Description: {task_details}
+        user_prompt = f"""Task Description: {_securaai_prompt_value(task_details)}
         Review Details:
-        {review_details}
+        {_securaai_prompt_value(review_details)}
         """
 
         ###
@@ -270,12 +339,12 @@ class FraudComplianceAgent(BaseAgent):
                     ][:2]
                     if compliance_docs:
                         docs_text = "\n".join(
-                            f"--- {f.filename} ---\n{f.content_text}"
+                            f"--- {_securaai_prompt_value(f.filename)} ---\n{_securaai_prompt_value(f.content_text)}"
                             for f in compliance_docs
                         )
                         user_prompt += f"""
         Vendor compliance documents from FinDrive for review:
-        {docs_text}
+        {_securaai_prompt_value(docs_text)}
         """
             except Exception:
                 logger.debug("Could not load vendor compliance docs from FinDrive")
