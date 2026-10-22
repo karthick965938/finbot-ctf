@@ -47,6 +47,75 @@ from finbot.agents.base import BaseAgent
 from finbot.core.auth.session import SessionContext, session_manager
 
 
+def sanitize_user_input(user_input):
+    """Strip prompt-injection patterns and isolate untrusted text."""
+    import re
+    if user_input is None:
+        return ""
+    if not isinstance(user_input, str):
+        return str(user_input)
+    if len(user_input) > 8000:
+        user_input = user_input[:8000]
+    patterns = [
+        r"ignore\s+(previous|all|above|prior)\s+instructions",
+        r"forget\s+(everything|previous|all|above)",
+        r"you\s+are\s+now",
+        r"new\s+instructions?:",
+        r"system\s*:",
+    ]
+    sanitized = user_input
+    for pattern in patterns:
+        sanitized = re.sub(pattern, "", sanitized, flags=re.IGNORECASE)
+    sanitized = sanitized.strip()
+    if "<<<USER_INPUT>>>" not in sanitized:
+        sanitized = f"<<<USER_INPUT>>>\n{sanitized}\n<<<END_USER_INPUT>>>"
+    return sanitized
+
+def validate_output(response):
+    """Redact credentials in model output without changing its shape."""
+    import re
+    if isinstance(response, str):
+        response = re.sub(r"sk-[A-Za-z0-9]{8,}", "[REDACTED]", response)
+        response = re.sub(
+            r"(?i)(api[_-]?key|password|secret)\s*[:=]\s*\S+",
+            r"\1=[REDACTED]",
+            response,
+        )
+        return response
+    if isinstance(response, dict):
+        return {key: validate_output(value) for key, value in response.items()}
+    if isinstance(response, list):
+        return [validate_output(value) for value in response]
+    content = getattr(response, "content", None)
+    if isinstance(content, str):
+        try:
+            response.content = validate_output(content)
+        except Exception:
+            pass
+    return response
+
+def _securaai_prompt_value(value):
+    """Sanitize text interpolated into a prompt. Leave numbers unchanged."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return str(value)
+    text = sanitize_user_input(value)
+    if "<<<USER_INPUT>>>" not in text:
+        text = f"<<<USER_INPUT>>>\n{text}\n<<<END_USER_INPUT>>>"
+    return text
+
+def _securaai_clean_tool_result(value):
+    """Sanitize tool output before it is appended to the model conversation."""
+    if isinstance(value, str):
+        return sanitize_user_input(value)
+    if isinstance(value, dict):
+        return {key: _securaai_clean_tool_result(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_securaai_clean_tool_result(item) for item in value]
+    return value
+
+
 # ============================================================================
 # Concrete Test Agent Implementation
 # ============================================================================
@@ -65,7 +134,7 @@ class ConcreteTestAgent(BaseAgent):
         """Get user prompt for test agent"""
         if task_data is None:
             return "Test task"
-        return f"Test task with data: {json.dumps(task_data)}"
+        return f"Test task with data: {_securaai_prompt_value(json.dumps(task_data))}"
 
     def _get_tool_definitions(self) -> list[dict[str, Any]]:
         """Tool definitions for test agent"""
@@ -77,10 +146,10 @@ class ConcreteTestAgent(BaseAgent):
 
     async def process(self, task_data: dict[str, Any], **kwargs) -> dict[str, Any]:
         """Process task data"""
-        return {
+        return validate_output({
             "task_status": "success",
             "task_summary": "Test agent completed task"
-        }
+        })
 
 
 class TestBaseAgentFramework:
